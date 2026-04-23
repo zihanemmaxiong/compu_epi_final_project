@@ -166,6 +166,126 @@ Outcomes in final cohort:
 
 ---
 
+## Final Analytic Dataset — Codebook
+
+54 columns, one row per patient = one index admission. Exported as
+`data/data.csv` / `analytic_dataset.csv` (gitignored).
+Grain: `(subject_id, hadm_id)` is the unique key.
+
+### Identifiers & timing
+
+| Variable | Type | Description |
+|---|---|---|
+| `subject_id` | int | MIMIC patient id |
+| `hadm_id` | int | Index hospital admission id |
+| `admittime` | datetime | Hospital admission time |
+| `dischtime` | datetime | Hospital discharge time |
+| `deathtime` | datetime | In-hospital death time (NA if discharged alive) |
+| `icu_intime` | datetime | First ICU entry of index admission — **anchor for the 24h window** |
+| `icu_outtime` | datetime | Last ICU exit of index admission |
+| `icu_total_los` | float | Total ICU length of stay in days (summed across ICU stays within admission) |
+| `rn` | int | Row-number from first-qualifying-admission pick; = 1 for all rows in final cohort |
+
+### Demographics
+
+| Variable | Type | Description |
+|---|---|---|
+| `gender` | chr | `M` / `F` |
+| `race` | chr | Raw MIMIC race string (multi-category; collapse for analysis) |
+| `insurance` | chr | Payer (Medicare / Medicaid / Other) |
+| `anchor_age` | int | Age at `anchor_year` (MIMIC deidentification anchor) |
+| `anchor_year` | int | Reference year for `anchor_age` |
+| `age_at_admit` | int | Age at index admission = `anchor_age + year(admittime) − anchor_year` |
+
+### Exposure
+
+| Variable | Type | Description |
+|---|---|---|
+| `has_af_index` | 0/1 | **Hospital-documented AF during index admission** (ICD-9 427.31/427.32, ICD-10 I48.x) — primary exposure |
+
+### HF subtype (from index-admission diagnoses)
+
+Not mutually exclusive. A row with all three = 0 has unspecified HF only (I50.9 / 428.9).
+
+| Variable | Type | Definition |
+|---|---|---|
+| `is_hfref` | 0/1 | Systolic HF — ICD-10 I50.21/22/23, ICD-9 428.21/22/23 |
+| `is_hfpef` | 0/1 | Diastolic HF — ICD-10 I50.31/32/33, ICD-9 428.31/32/33 |
+| `is_hfmixed` | 0/1 | Combined / specified — ICD-10 I50.41/42/43, I50.811/812/813; ICD-9 428.41/42/43 |
+
+### Comorbidities (history-of flags)
+
+All binary 0/1. Defined as **any qualifying ICD code in any admission with `admittime ≤ index admittime`** (so prior admissions count). Source: `diagnoses_icd`.
+
+| Variable | Description |
+|---|---|
+| `has_htn` | Hypertension |
+| `has_dm` | Diabetes mellitus |
+| `has_ckd` | Chronic kidney disease |
+| `has_cad` | Coronary artery disease |
+| `has_copd` | Chronic obstructive pulmonary disease |
+| `has_valvular` | Valvular heart disease |
+| `has_pad` | Peripheral arterial disease |
+| `has_stroke_hx` | Stroke / TIA history |
+| `has_pulm_htn` | Pulmonary hypertension |
+| `has_cardiomyopathy` | Cardiomyopathy (non-ischemic) |
+
+### ICU care unit (first ICU of index admission)
+
+| Variable | Type | Description |
+|---|---|---|
+| `first_careunit` | chr | Raw unit name (CCU, CVICU, MICU, SICU, MICU/SICU, …) |
+| `careunit_cat` | chr | Collapsed: **Cardiac** (CCU, CVICU) / **Medical** (MICU, MICU/SICU) / **Surgical/Other** |
+
+### First-24h labs
+
+Extreme value within 24h of `icu_intime`. Source: `labevents` (fluid = 'Blood'). MIMIC default units, no conversion.
+
+| Variable | Units | Extreme | Rationale |
+|---|---|---|---|
+| `wbc_max` | K/µL | MAX | inflammation / infection burden |
+| `hemoglobin_min` | g/dL | MIN | worst anemia |
+| `platelets_min` | K/µL | MIN | worst thrombocytopenia |
+| `creatinine_max` | mg/dL | MAX | worst renal function |
+| `bun_max` | mg/dL | MAX | worst azotemia / volume status |
+| `sodium_min` | mEq/L | MIN | worst hyponatremia (HF prognostic) |
+| `potassium_max` | mEq/L | MAX | worst hyperkalemia (arrhythmia risk) |
+| `glucose_max` | mg/dL | MAX | stress hyperglycemia |
+| `anion_gap_max` | mEq/L | MAX | worst metabolic acidosis |
+| `rdw_max` | % | MAX | RDW (established HF mortality marker) |
+
+### First-24h vitals
+
+Extreme within 24h of `icu_intime`. Source: `chartevents`. NIBP and arterial-line itemids are pooled for BP. Temperature converted to °C when sourced in °F.
+
+| Variable | Units | Extreme | MIMIC itemids |
+|---|---|---|---|
+| `heart_rate_max` | bpm | MAX | 220045 |
+| `sbp_min` | mmHg | MIN | 220179, 220050 |
+| `dbp_min` | mmHg | MIN | 220180, 220051 |
+| `mbp_min` | mmHg | MIN | 220181, 220052 |
+| `rr_max` | breaths/min | MAX | 220210 |
+| `spo2_min` | % | MIN | 220277 |
+| `temp_max_c` | °C | MAX | 223761 (°F→°C), 223762 (°C) |
+
+### Primary outcome — in-hospital mortality
+
+| Variable | Type | Description |
+|---|---|---|
+| `hospital_expire_flag` | 0/1 | Died before hospital discharge (from `admissions`) — **primary outcome** |
+| `discharge_location` | chr | Raw discharge disposition (HOME, HOSPICE, DIED, SNF, …) — descriptive / sensitivity |
+
+### Secondary outcome — 30-day all-cause mortality (Cox)
+
+| Variable | Type | Description |
+|---|---|---|
+| `dod` | date | Date of death from `patients.dod` (includes post-discharge deaths) |
+| `death_30d` | 0/1 | Event flag: died within 30 days of `admittime` |
+| `time_to_event_30d` | float | Days from `admittime` to event or censoring; capped at 30 |
+| `censored_30d` | 0/1 | Censored at day 30 (alive and no `dod` within 30 days) |
+
+---
+
 ## Running the pipeline
 
 1. Place MIMIC-IV v3.1 CSVs in `./data/`
