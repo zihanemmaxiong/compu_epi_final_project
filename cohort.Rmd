@@ -1,0 +1,979 @@
+---
+title: "Extract Acute HF Cohort (MIMIC-IV, DuckDB)"
+author: "Zihan Xiong"
+date: "2026-04-20"
+output: html_document
+---
+
+```{r setup, message=FALSE}
+library(duckdb)
+library(DBI)
+library(dplyr)
+
+data_dir <- "data"
+con <- dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+```
+
+# Register MIMIC tables as DuckDB views
+
+```{r register-views}
+register_view <- function(con, name, file) {
+  path <- file.path(data_dir, file)
+  sql <- paste0(
+    "CREATE OR REPLACE VIEW ", name,
+    " AS SELECT * FROM read_csv_auto('", path, "')"
+  )
+  dbExecute(con, sql)
+}
+
+register_view(con, "diagnoses_icd", "diagnoses_icd.csv.gz")
+register_view(con, "admissions",    "admissions.csv.gz")
+register_view(con, "patients",      "patients.csv.gz")
+register_view(con, "icustays",      "icustays.csv.gz")
+register_view(con, "d_labitems",    "d_labitems.csv.gz")
+register_view(con, "labevents",     "labevents.csv.gz")
+register_view(con, "d_items",       "d_items.csv.gz")
+register_view(con, "chartevents",   "chartevents.csv.gz")
+```
+
+# Pull all acute HF patients (ICD codes from Yan et al. 2023)
+
+```{r extract-hf}
+hf_sql <- "
+WITH acute_hf_codes AS (
+  SELECT icd_code, icd_version, hadm_id, subject_id
+  FROM diagnoses_icd
+  WHERE (icd_version = 9 AND icd_code IN (
+      '42821','42822','42823',
+      '42831','42832','42833',
+      '42841','42842','42843'
+  ))
+  OR (icd_version = 10 AND icd_code IN (
+      'I5021','I5022','I5023',
+      'I5031','I5032','I5033',
+      'I5041','I5042','I5043',
+      'I50811','I50812','I50813'
+  ))
+),
+hf_subtype AS (
+  SELECT
+    hadm_id,
+    subject_id,
+    MAX(CASE
+      WHEN icd_code IN ('42821','42822','42823','I5021','I5022','I5023')
+      THEN 1 ELSE 0 END) AS is_hfref,
+    MAX(CASE
+      WHEN icd_code IN ('42831','42832','42833','I5031','I5032','I5033')
+      THEN 1 ELSE 0 END) AS is_hfpef,
+    MAX(CASE
+      WHEN icd_code IN ('42841','42842','42843',
+                        'I5041','I5042','I5043',
+                        'I50811','I50812','I50813')
+      THEN 1 ELSE 0 END) AS is_hfmixed
+  FROM acute_hf_codes
+  GROUP BY hadm_id, subject_id
+)
+SELECT
+  h.subject_id,
+  h.hadm_id,
+  a.admittime,
+  a.dischtime,
+  a.deathtime,
+  a.hospital_expire_flag,
+  a.admission_type,
+  a.race,
+  a.insurance,
+  p.gender,
+  p.anchor_age,
+  p.anchor_year,
+  h.is_hfref,
+  h.is_hfpef,
+  h.is_hfmixed
+FROM hf_subtype h
+LEFT JOIN admissions a USING (hadm_id, subject_id)
+LEFT JOIN patients p   USING (subject_id)
+ORDER BY h.subject_id, a.admittime;
+"
+
+hf_cohort <- dbGetQuery(con, hf_sql)
+```
+
+# Summary counts
+
+```{r summary}
+cat("Acute HF admissions:", nrow(hf_cohort), "\n")
+cat("Unique patients:    ", dplyr::n_distinct(hf_cohort$subject_id), "\n\n")
+
+subtype_counts <- hf_cohort |>
+  summarise(
+    hfref  = sum(is_hfref,  na.rm = TRUE),
+    hfpef  = sum(is_hfpef,  na.rm = TRUE),
+    mixed  = sum(is_hfmixed, na.rm = TRUE)
+  )
+print(subtype_counts)
+
+head(hf_cohort)
+```
+
+# Check AF patients within the HF cohort
+
+```{r af-check}
+dbWriteTable(con, "hf_cohort_ids",
+             hf_cohort["hadm_id"], overwrite = TRUE)
+
+af_sql <- "
+WITH af_dx AS (
+  SELECT DISTINCT subject_id, hadm_id
+  FROM diagnoses_icd
+  WHERE (icd_version = 9  AND icd_code = '42731')
+     OR (icd_version = 10 AND icd_code IN ('I480','I481','I482','I4891'))
+)
+SELECT
+  COUNT(DISTINCT h.hadm_id) AS n_hf_admissions,
+  COUNT(DISTINCT CASE WHEN af.hadm_id IS NOT NULL
+                      THEN h.hadm_id END) AS n_hf_with_af,
+  ROUND(100.0 * COUNT(DISTINCT CASE WHEN af.hadm_id IS NOT NULL
+                                    THEN h.hadm_id END)
+              / COUNT(DISTINCT h.hadm_id), 2) AS pct_af
+FROM hf_cohort_ids h
+LEFT JOIN af_dx af USING (hadm_id);
+"
+
+af_counts <- dbGetQuery(con, af_sql)
+print(af_counts)
+```
+
+# Restrict to ICU stays and re-check AF
+
+```{r icu-af-check}
+icu_af_sql <- "
+WITH hf_icu AS (
+  SELECT DISTINCT icu.subject_id, icu.hadm_id
+  FROM icustays icu
+  INNER JOIN hf_cohort_ids h USING (hadm_id)
+),
+af_dx AS (
+  SELECT DISTINCT subject_id, hadm_id
+  FROM diagnoses_icd
+  WHERE (icd_version = 9  AND icd_code = '42731')
+     OR (icd_version = 10 AND icd_code IN ('I480','I481','I482','I4891'))
+)
+SELECT
+  COUNT(DISTINCT hf_icu.hadm_id) AS n_icu_hf,
+  COUNT(DISTINCT hf_icu.subject_id) AS n_icu_hf_patients,
+  COUNT(DISTINCT CASE WHEN af.hadm_id IS NOT NULL
+                      THEN hf_icu.hadm_id END) AS n_icu_hf_with_af,
+  ROUND(100.0 * COUNT(DISTINCT CASE WHEN af.hadm_id IS NOT NULL
+                                    THEN hf_icu.hadm_id END)
+              / COUNT(DISTINCT hf_icu.hadm_id), 2) AS pct_af
+FROM hf_icu
+LEFT JOIN af_dx af USING (hadm_id);
+"
+
+icu_af_counts <- dbGetQuery(con, icu_af_sql)
+print(icu_af_counts)
+```
+
+# Build final cohort with exclusions
+
+Apply (in order): demographics join, age >= 18, ICU >= 24h,
+exclude AMA/hospice, first qualifying admission per patient,
+exclude patients with prior AF.
+
+```{r build-cohort}
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_acute_hf AS
+SELECT DISTINCT hadm_id, subject_id
+FROM diagnoses_icd
+WHERE (icd_version = 9  AND icd_code IN (
+    '42821','42822','42823',
+    '42831','42832','42833',
+    '42841','42842','42843'))
+   OR (icd_version = 10 AND icd_code IN (
+    'I5021','I5022','I5023',
+    'I5031','I5032','I5033',
+    'I5041','I5042','I5043',
+    'I50811','I50812','I50813'));
+")
+
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_hf_admits AS
+SELECT
+  a.subject_id, a.hadm_id,
+  a.admittime, a.dischtime, a.deathtime,
+  a.hospital_expire_flag, a.discharge_location,
+  a.race, a.insurance,
+  p.gender, p.anchor_age, p.anchor_year,
+  (p.anchor_age +
+    EXTRACT(YEAR FROM a.admittime) - p.anchor_year) AS age_at_admit
+FROM stg_acute_hf h
+INNER JOIN admissions a USING (hadm_id, subject_id)
+INNER JOIN patients   p USING (subject_id);
+")
+
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_icu_first AS
+SELECT
+  subject_id, hadm_id,
+  MIN(intime)  AS icu_intime,
+  MAX(outtime) AS icu_outtime,
+  SUM(los)     AS icu_total_los
+FROM icustays
+GROUP BY subject_id, hadm_id;
+")
+
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_qualifying AS
+SELECT h.*,
+  icu.icu_intime, icu.icu_outtime, icu.icu_total_los
+FROM stg_hf_admits h
+INNER JOIN stg_icu_first icu USING (subject_id, hadm_id)
+WHERE h.age_at_admit >= 18
+  AND icu.icu_total_los >= 1.0
+  AND h.dischtime IS NOT NULL
+  AND (h.discharge_location IS NULL
+       OR h.discharge_location NOT IN
+           ('AGAINST ADVICE','HOSPICE'));
+")
+
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_index AS
+SELECT * FROM (
+  SELECT q.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY subject_id ORDER BY admittime
+    ) AS rn
+  FROM stg_qualifying q
+) WHERE rn = 1;
+")
+
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_af_dx AS
+SELECT DISTINCT subject_id, hadm_id
+FROM diagnoses_icd
+WHERE (icd_version = 9  AND icd_code = '42731')
+   OR (icd_version = 10 AND icd_code IN
+           ('I480','I481','I482','I4891'));
+")
+
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_prior_af AS
+SELECT DISTINCT i.subject_id
+FROM stg_index i
+INNER JOIN admissions a2
+  ON a2.subject_id = i.subject_id
+INNER JOIN stg_af_dx af
+  ON af.hadm_id = a2.hadm_id
+WHERE a2.admittime < i.admittime;
+")
+
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_final AS
+SELECT i.*,
+  CASE WHEN af.hadm_id IS NOT NULL
+       THEN 1 ELSE 0 END AS has_af_index
+FROM stg_index i
+LEFT JOIN stg_af_dx af ON af.hadm_id = i.hadm_id
+WHERE i.subject_id NOT IN (
+  SELECT subject_id FROM stg_prior_af
+);
+")
+
+final_cohort <- dbGetQuery(con, "SELECT * FROM stg_final;")
+cat("Final cohort rows:", nrow(final_cohort), "\n")
+```
+
+# Cohort flow diagram
+
+```{r cohort-flow}
+flow_counts <- dbGetQuery(con, "
+SELECT 1 AS step_no,
+       'acute HF admissions'            AS step,
+       COUNT(DISTINCT hadm_id)          AS n_admits,
+       COUNT(DISTINCT subject_id)       AS n_patients
+FROM stg_acute_hf
+UNION ALL
+SELECT 2, 'joined demographics',
+       COUNT(DISTINCT hadm_id),
+       COUNT(DISTINCT subject_id)
+FROM stg_hf_admits
+UNION ALL
+SELECT 3, 'age>=18, ICU>=24h, not AMA/hospice, has dischtime',
+       COUNT(DISTINCT hadm_id),
+       COUNT(DISTINCT subject_id)
+FROM stg_qualifying
+UNION ALL
+SELECT 4, 'first qualifying admission per patient',
+       COUNT(DISTINCT hadm_id),
+       COUNT(DISTINCT subject_id)
+FROM stg_index
+UNION ALL
+SELECT 5, 'final (no prior AF)',
+       COUNT(DISTINCT hadm_id),
+       COUNT(DISTINCT subject_id)
+FROM stg_final
+ORDER BY step_no;
+")
+print(flow_counts)
+```
+
+# AF event count + decision rule (PROJECT_CONTEXT §4.3)
+
+```{r af-events}
+af_event <- dbGetQuery(con, "
+SELECT
+  SUM(has_af_index)             AS n_af_events,
+  COUNT(*)                      AS n_total,
+  ROUND(100.0 * SUM(has_af_index)
+        / COUNT(*), 2)          AS pct_af,
+  SUM(hospital_expire_flag)     AS n_deaths
+FROM stg_final;
+")
+print(af_event)
+
+n_events <- af_event$n_af_events
+if (n_events < 500) {
+  cat("Decision: <500 AF events -> drop XGBoost, use LASSO\n")
+} else if (n_events < 1000) {
+  cat("Decision: 500-1000 -> XGBoost OK overall; ",
+      "subgroup SHAP descriptive only\n", sep = "")
+} else {
+  cat("Decision: >=1000 -> full plan, XGBoost + subgroup SHAP\n")
+}
+```
+
+## Secondary outcome: 30-day all-cause mortality
+
+First, check `dod` coverage in the final cohort to decide whether
+30-day post-discharge mortality is feasible as a secondary outcome.
+
+```{r dod-coverage}
+dod_check <- dbGetQuery(con, "
+SELECT
+  COUNT(*)                                       AS n_total,
+  SUM(CASE WHEN p.dod IS NOT NULL THEN 1 ELSE 0 END)
+                                                 AS n_with_dod,
+  SUM(CASE WHEN f.hospital_expire_flag = 1
+           THEN 1 ELSE 0 END)                    AS n_inhosp_death,
+  SUM(CASE WHEN p.dod IS NOT NULL
+           AND f.hospital_expire_flag = 0
+           THEN 1 ELSE 0 END)                    AS n_post_discharge_death,
+  SUM(CASE WHEN p.dod IS NOT NULL
+           AND f.hospital_expire_flag = 0
+           AND p.dod <= f.dischtime + INTERVAL 30 DAY
+           THEN 1 ELSE 0 END)                    AS n_30d_postdc_death
+FROM stg_final f
+LEFT JOIN patients p USING (subject_id);
+")
+print(dod_check)
+```
+
+If `n_post_discharge_death` is large enough (ideally ≥ 200), build the
+30-day mortality outcome and time-to-event variables for the secondary
+Cox analysis.
+
+```{r build-30d-outcome}
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_final_surv AS
+SELECT
+  f.*,
+  p.dod,
+  CASE
+    WHEN f.hospital_expire_flag = 1 THEN 1
+    WHEN p.dod IS NOT NULL
+         AND p.dod <= f.admittime + INTERVAL 30 DAY THEN 1
+    ELSE 0
+  END AS death_30d,
+  CASE
+    WHEN f.hospital_expire_flag = 1
+      THEN DATE_DIFF('day', f.admittime, f.deathtime)
+    WHEN p.dod IS NOT NULL
+         AND p.dod <= f.admittime + INTERVAL 30 DAY
+      THEN DATE_DIFF('day', f.admittime, p.dod)
+    ELSE 30
+  END AS time_to_event_30d,
+  CASE
+    WHEN f.hospital_expire_flag = 1 THEN 0
+    WHEN p.dod IS NOT NULL
+         AND p.dod <= f.admittime + INTERVAL 30 DAY THEN 0
+    ELSE 1
+  END AS censored_30d
+FROM stg_final f
+LEFT JOIN patients p USING (subject_id);
+")
+
+surv_summary <- dbGetQuery(con, "
+SELECT
+  COUNT(*)                          AS n,
+  SUM(death_30d)                    AS n_deaths_30d,
+  SUM(censored_30d)                 AS n_censored,
+  ROUND(100.0 * SUM(death_30d) / COUNT(*), 2)
+                                    AS pct_death_30d,
+  ROUND(AVG(time_to_event_30d), 1)  AS mean_follow_days
+FROM stg_final_surv;
+")
+print(surv_summary)
+```
+
+# Baseline covariates: HF subtype, comorbidities, first ICU unit
+
+## HF subtype flag (recover from index admission diagnoses)
+
+```{r extract-subtype}
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_subtype AS
+SELECT
+  d.subject_id, d.hadm_id,
+  MAX(CASE
+    WHEN (d.icd_version = 9
+          AND d.icd_code IN ('42821','42822','42823'))
+      OR (d.icd_version = 10
+          AND d.icd_code IN ('I5021','I5022','I5023'))
+    THEN 1 ELSE 0 END)                                 AS is_hfref,
+  MAX(CASE
+    WHEN (d.icd_version = 9
+          AND d.icd_code IN ('42831','42832','42833'))
+      OR (d.icd_version = 10
+          AND d.icd_code IN ('I5031','I5032','I5033'))
+    THEN 1 ELSE 0 END)                                 AS is_hfpef,
+  MAX(CASE
+    WHEN (d.icd_version = 9
+          AND d.icd_code IN ('42841','42842','42843'))
+      OR (d.icd_version = 10
+          AND d.icd_code IN ('I5041','I5042','I5043',
+                             'I50811','I50812','I50813'))
+    THEN 1 ELSE 0 END)                                 AS is_hfmixed
+FROM diagnoses_icd d
+INNER JOIN stg_final f USING (subject_id, hadm_id)
+GROUP BY d.subject_id, d.hadm_id;
+")
+```
+
+## Comorbidity binary flags (from all admissions up to and incl. index)
+
+```{r extract-comorb}
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_comorb AS
+WITH pt_dx AS (
+  SELECT
+    f.subject_id,
+    f.hadm_id AS index_hadm_id,
+    d.icd_code,
+    d.icd_version
+  FROM stg_final f
+  INNER JOIN admissions a
+    ON a.subject_id = f.subject_id
+   AND a.admittime <= f.admittime
+  INNER JOIN diagnoses_icd d
+    ON d.hadm_id     = a.hadm_id
+   AND d.subject_id  = a.subject_id
+)
+SELECT
+  subject_id,
+  index_hadm_id AS hadm_id,
+  MAX(CASE WHEN
+    (icd_version = 9  AND (icd_code LIKE '401%'
+                        OR icd_code LIKE '402%'
+                        OR icd_code LIKE '403%'
+                        OR icd_code LIKE '404%'
+                        OR icd_code LIKE '405%'))
+    OR (icd_version = 10 AND (icd_code LIKE 'I10%'
+                           OR icd_code LIKE 'I11%'
+                           OR icd_code LIKE 'I12%'
+                           OR icd_code LIKE 'I13%'
+                           OR icd_code LIKE 'I15%'))
+    THEN 1 ELSE 0 END)                                AS has_htn,
+  MAX(CASE WHEN
+    (icd_version = 9  AND (icd_code LIKE '249%'
+                        OR icd_code LIKE '250%'))
+    OR (icd_version = 10 AND (icd_code LIKE 'E08%'
+                           OR icd_code LIKE 'E09%'
+                           OR icd_code LIKE 'E10%'
+                           OR icd_code LIKE 'E11%'
+                           OR icd_code LIKE 'E13%'))
+    THEN 1 ELSE 0 END)                                AS has_dm,
+  MAX(CASE WHEN
+    (icd_version = 9  AND icd_code LIKE '585%')
+    OR (icd_version = 10 AND icd_code LIKE 'N18%')
+    THEN 1 ELSE 0 END)                                AS has_ckd,
+  MAX(CASE WHEN
+    (icd_version = 9  AND (icd_code LIKE '410%'
+                        OR icd_code LIKE '411%'
+                        OR icd_code LIKE '412%'
+                        OR icd_code LIKE '413%'
+                        OR icd_code LIKE '414%'))
+    OR (icd_version = 10 AND (icd_code LIKE 'I20%'
+                           OR icd_code LIKE 'I21%'
+                           OR icd_code LIKE 'I22%'
+                           OR icd_code LIKE 'I23%'
+                           OR icd_code LIKE 'I24%'
+                           OR icd_code LIKE 'I25%'))
+    THEN 1 ELSE 0 END)                                AS has_cad,
+  MAX(CASE WHEN
+    (icd_version = 9  AND (icd_code LIKE '491%'
+                        OR icd_code LIKE '492%'
+                        OR icd_code LIKE '496%'))
+    OR (icd_version = 10 AND (icd_code LIKE 'J41%'
+                           OR icd_code LIKE 'J42%'
+                           OR icd_code LIKE 'J43%'
+                           OR icd_code LIKE 'J44%'))
+    THEN 1 ELSE 0 END)                                AS has_copd,
+  MAX(CASE WHEN
+    (icd_version = 9  AND (icd_code LIKE '394%'
+                        OR icd_code LIKE '395%'
+                        OR icd_code LIKE '396%'
+                        OR icd_code LIKE '397%'
+                        OR icd_code LIKE '424%'))
+    OR (icd_version = 10 AND (icd_code LIKE 'I05%'
+                           OR icd_code LIKE 'I06%'
+                           OR icd_code LIKE 'I07%'
+                           OR icd_code LIKE 'I08%'
+                           OR icd_code LIKE 'I09%'
+                           OR icd_code LIKE 'I34%'
+                           OR icd_code LIKE 'I35%'
+                           OR icd_code LIKE 'I36%'
+                           OR icd_code LIKE 'I37%'
+                           OR icd_code LIKE 'I38%'
+                           OR icd_code LIKE 'I39%'))
+    THEN 1 ELSE 0 END)                                AS has_valvular,
+  MAX(CASE WHEN
+    (icd_version = 9  AND (icd_code LIKE '440%'
+                        OR icd_code LIKE '4439%'))
+    OR (icd_version = 10 AND (icd_code LIKE 'I70%'
+                           OR icd_code LIKE 'I73%'))
+    THEN 1 ELSE 0 END)                                AS has_pad,
+  MAX(CASE WHEN
+    (icd_version = 9  AND (icd_code LIKE '433%'
+                        OR icd_code LIKE '434%'
+                        OR icd_code LIKE '435%'
+                        OR icd_code LIKE '436%'
+                        OR icd_code LIKE '437%'
+                        OR icd_code LIKE '438%'))
+    OR (icd_version = 10 AND (icd_code LIKE 'I60%'
+                           OR icd_code LIKE 'I61%'
+                           OR icd_code LIKE 'I62%'
+                           OR icd_code LIKE 'I63%'
+                           OR icd_code LIKE 'I64%'
+                           OR icd_code LIKE 'I65%'
+                           OR icd_code LIKE 'I66%'
+                           OR icd_code LIKE 'I67%'
+                           OR icd_code LIKE 'I68%'
+                           OR icd_code LIKE 'I69%'
+                           OR icd_code LIKE 'G45%'))
+    THEN 1 ELSE 0 END)                                AS has_stroke_hx,
+  MAX(CASE WHEN
+    (icd_version = 9  AND icd_code IN ('4160','4168','4169'))
+    OR (icd_version = 10 AND icd_code LIKE 'I27%')
+    THEN 1 ELSE 0 END)                                AS has_pulm_htn,
+  MAX(CASE WHEN
+    (icd_version = 9  AND icd_code LIKE '425%')
+    OR (icd_version = 10 AND icd_code LIKE 'I42%')
+    THEN 1 ELSE 0 END)                                AS has_cardiomyopathy
+FROM pt_dx
+GROUP BY subject_id, index_hadm_id;
+")
+```
+
+## First care unit of the index ICU admission
+
+```{r extract-careunit}
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_careunit AS
+SELECT subject_id, hadm_id, first_careunit
+FROM icustays
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY subject_id, hadm_id ORDER BY intime
+) = 1;
+")
+```
+
+## Merge into analytic dataset
+
+```{r build-analytic}
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_analytic AS
+SELECT
+  f.*,
+  s.is_hfref, s.is_hfpef, s.is_hfmixed,
+  c.has_htn, c.has_dm, c.has_ckd, c.has_cad, c.has_copd,
+  c.has_valvular, c.has_pad, c.has_stroke_hx,
+  c.has_pulm_htn, c.has_cardiomyopathy,
+  u.first_careunit,
+  CASE
+    WHEN u.first_careunit IN (
+           'Coronary Care Unit (CCU)',
+           'Cardiac Vascular Intensive Care Unit (CVICU)')
+      THEN 'Cardiac'
+    WHEN u.first_careunit IN (
+           'Medical Intensive Care Unit (MICU)',
+           'Medical/Surgical Intensive Care Unit (MICU/SICU)')
+      THEN 'Medical'
+    ELSE 'Surgical/Other'
+  END                                        AS careunit_cat
+FROM stg_final f
+LEFT JOIN stg_subtype  s USING (subject_id, hadm_id)
+LEFT JOIN stg_comorb   c USING (subject_id, hadm_id)
+LEFT JOIN stg_careunit u USING (subject_id, hadm_id);
+")
+
+analytic <- dbGetQuery(con, "SELECT * FROM stg_analytic;")
+cat("Rows:", nrow(analytic),
+    "  Columns:", ncol(analytic), "\n")
+str(analytic)
+```
+
+## Quick Table 1 snapshot
+
+```{r table1-snapshot}
+summary_tab <- dbGetQuery(con, "
+SELECT
+  COUNT(*)                                      AS n,
+  ROUND(AVG(age_at_admit), 1)                   AS mean_age,
+  ROUND(100.0 * SUM(CASE WHEN gender = 'F' THEN 1 ELSE 0 END)
+        / COUNT(*), 1)                          AS pct_female,
+  ROUND(100.0 * SUM(is_hfref) / COUNT(*), 1)    AS pct_hfref,
+  ROUND(100.0 * SUM(is_hfpef) / COUNT(*), 1)    AS pct_hfpef,
+  ROUND(100.0 * SUM(is_hfmixed) / COUNT(*), 1)  AS pct_hfmixed,
+  ROUND(100.0 * SUM(has_htn) / COUNT(*), 1)            AS pct_htn,
+  ROUND(100.0 * SUM(has_dm) / COUNT(*), 1)             AS pct_dm,
+  ROUND(100.0 * SUM(has_ckd) / COUNT(*), 1)            AS pct_ckd,
+  ROUND(100.0 * SUM(has_cad) / COUNT(*), 1)            AS pct_cad,
+  ROUND(100.0 * SUM(has_copd) / COUNT(*), 1)           AS pct_copd,
+  ROUND(100.0 * SUM(has_valvular) / COUNT(*), 1)       AS pct_valvular,
+  ROUND(100.0 * SUM(has_pad) / COUNT(*), 1)            AS pct_pad,
+  ROUND(100.0 * SUM(has_stroke_hx) / COUNT(*), 1)      AS pct_stroke,
+  ROUND(100.0 * SUM(has_pulm_htn) / COUNT(*), 1)       AS pct_pulmhtn,
+  ROUND(100.0 * SUM(has_cardiomyopathy) / COUNT(*), 1) AS pct_cmp
+FROM stg_analytic;
+")
+print(summary_tab)
+
+careunit_dist <- dbGetQuery(con, "
+SELECT first_careunit, COUNT(*) AS n,
+       ROUND(100.0 * COUNT(*) /
+             (SELECT COUNT(*) FROM stg_analytic), 1) AS pct
+FROM stg_analytic
+GROUP BY first_careunit
+ORDER BY n DESC;
+")
+print(careunit_dist)
+
+careunit_cat_dist <- dbGetQuery(con, "
+SELECT careunit_cat, COUNT(*) AS n,
+       ROUND(100.0 * COUNT(*) /
+             (SELECT COUNT(*) FROM stg_analytic), 1) AS pct
+FROM stg_analytic
+GROUP BY careunit_cat
+ORDER BY n DESC;
+")
+print(careunit_cat_dist)
+```
+
+# First-24h physiology: labs
+
+Extract extremes (MIN / MAX) of 10 labs within 24h of ICU intime.
+Source: `labevents` + `d_labitems` lookup. Keyed on (subject_id, hadm_id).
+
+## Lab itemid lookup (for reference)
+
+```{r explore-labitems}
+labitem_lookup <- dbGetQuery(con, "
+SELECT itemid, label, fluid, category
+FROM d_labitems
+WHERE fluid = 'Blood'
+  AND label IN ('White Blood Cells',
+                'Hemoglobin',
+                'Platelet Count',
+                'Creatinine',
+                'Urea Nitrogen',
+                'Sodium',
+                'Potassium',
+                'Glucose',
+                'Anion Gap',
+                'RDW')
+ORDER BY label;
+")
+print(labitem_lookup)
+```
+
+## Extract 24h lab extremes
+
+```{r extract-labs-24h}
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_labs_24h AS
+WITH lab_items AS (
+  SELECT itemid, label
+  FROM d_labitems
+  WHERE fluid = 'Blood'
+    AND label IN ('White Blood Cells',
+                  'Hemoglobin',
+                  'Platelet Count',
+                  'Creatinine',
+                  'Urea Nitrogen',
+                  'Sodium',
+                  'Potassium',
+                  'Glucose',
+                  'Anion Gap',
+                  'RDW')
+),
+labs_window AS (
+  SELECT
+    f.subject_id,
+    f.hadm_id,
+    li.label,
+    le.valuenum
+  FROM stg_analytic f
+  INNER JOIN labevents le
+    ON le.subject_id = f.subject_id
+   AND le.hadm_id    = f.hadm_id
+  INNER JOIN lab_items li ON li.itemid = le.itemid
+  WHERE le.charttime >= f.icu_intime
+    AND le.charttime <= f.icu_intime + INTERVAL '24 hours'
+    AND le.valuenum IS NOT NULL
+)
+SELECT
+  subject_id,
+  hadm_id,
+  MAX(CASE WHEN label = 'White Blood Cells'
+           THEN valuenum END)          AS wbc_max,
+  MIN(CASE WHEN label = 'Hemoglobin'
+           THEN valuenum END)          AS hemoglobin_min,
+  MIN(CASE WHEN label = 'Platelet Count'
+           THEN valuenum END)          AS platelets_min,
+  MAX(CASE WHEN label = 'Creatinine'
+           THEN valuenum END)          AS creatinine_max,
+  MAX(CASE WHEN label = 'Urea Nitrogen'
+           THEN valuenum END)          AS bun_max,
+  MIN(CASE WHEN label = 'Sodium'
+           THEN valuenum END)          AS sodium_min,
+  MAX(CASE WHEN label = 'Potassium'
+           THEN valuenum END)          AS potassium_max,
+  MAX(CASE WHEN label = 'Glucose'
+           THEN valuenum END)          AS glucose_max,
+  MAX(CASE WHEN label = 'Anion Gap'
+           THEN valuenum END)          AS anion_gap_max,
+  MAX(CASE WHEN label = 'RDW'
+           THEN valuenum END)          AS rdw_max
+FROM labs_window
+GROUP BY subject_id, hadm_id;
+")
+```
+
+## Coverage + distribution sanity check
+
+```{r labs-coverage}
+labs_coverage <- dbGetQuery(con, "
+WITH cohort AS (
+  SELECT COUNT(*) AS n_total FROM stg_analytic
+)
+SELECT
+  (SELECT n_total FROM cohort)                               AS n_cohort,
+  COUNT(*)                                                   AS n_with_any,
+  ROUND(100.0 * COUNT(*)
+        / (SELECT n_total FROM cohort), 1)                   AS pct_any,
+  SUM(CASE WHEN wbc_max        IS NOT NULL THEN 1 END)       AS n_wbc,
+  SUM(CASE WHEN hemoglobin_min IS NOT NULL THEN 1 END)       AS n_hb,
+  SUM(CASE WHEN platelets_min  IS NOT NULL THEN 1 END)       AS n_plt,
+  SUM(CASE WHEN creatinine_max IS NOT NULL THEN 1 END)       AS n_cr,
+  SUM(CASE WHEN bun_max        IS NOT NULL THEN 1 END)       AS n_bun,
+  SUM(CASE WHEN sodium_min     IS NOT NULL THEN 1 END)       AS n_na,
+  SUM(CASE WHEN potassium_max  IS NOT NULL THEN 1 END)       AS n_k,
+  SUM(CASE WHEN glucose_max    IS NOT NULL THEN 1 END)       AS n_glu,
+  SUM(CASE WHEN anion_gap_max  IS NOT NULL THEN 1 END)       AS n_ag,
+  SUM(CASE WHEN rdw_max        IS NOT NULL THEN 1 END)       AS n_rdw
+FROM stg_labs_24h;
+")
+print(labs_coverage)
+
+labs_summary <- dbGetQuery(con, "
+SELECT
+  ROUND(MEDIAN(wbc_max),        1) AS med_wbc,
+  ROUND(MEDIAN(hemoglobin_min), 1) AS med_hb,
+  ROUND(MEDIAN(platelets_min),  1) AS med_plt,
+  ROUND(MEDIAN(creatinine_max), 2) AS med_cr,
+  ROUND(MEDIAN(bun_max),        1) AS med_bun,
+  ROUND(MEDIAN(sodium_min),     1) AS med_na,
+  ROUND(MEDIAN(potassium_max),  2) AS med_k,
+  ROUND(MEDIAN(glucose_max),    1) AS med_glu,
+  ROUND(MEDIAN(anion_gap_max),  1) AS med_ag,
+  ROUND(MEDIAN(rdw_max),        1) AS med_rdw
+FROM stg_labs_24h;
+")
+print(labs_summary)
+```
+
+# First-24h physiology: vitals
+
+Extract extremes of 6 vital signs within 24h of ICU intime from
+`chartevents` (~30 GB). First query will take 5-10 minutes.
+
+## Vital-sign itemid lookup
+
+```{r explore-vital-items}
+vital_items <- dbGetQuery(con, "
+SELECT itemid, label, category, unitname
+FROM d_items
+WHERE itemid IN (
+    220045,                    -- Heart Rate
+    220179, 220050,            -- SBP (NIBP + arterial line)
+    220180, 220051,            -- DBP (NIBP + arterial line)
+    220181, 220052,            -- MBP (NIBP + arterial line)
+    220210,                    -- Respiratory Rate
+    220277,                    -- SpO2
+    223761, 223762             -- Temperature F / C
+  )
+ORDER BY category, label;
+")
+print(vital_items)
+```
+
+## Extract 24h vital extremes
+
+```{r extract-vitals-24h}
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_vitals_24h AS
+WITH vitals_window AS (
+  SELECT
+    f.subject_id,
+    f.hadm_id,
+    ce.itemid,
+    ce.valuenum
+  FROM stg_analytic f
+  INNER JOIN chartevents ce
+    ON ce.subject_id = f.subject_id
+   AND ce.hadm_id    = f.hadm_id
+  WHERE ce.itemid IN (
+          220045,
+          220179, 220050,
+          220180, 220051,
+          220181, 220052,
+          220210,
+          220277,
+          223761, 223762
+        )
+    AND ce.charttime >= f.icu_intime
+    AND ce.charttime <= f.icu_intime + INTERVAL '24 hours'
+    AND ce.valuenum IS NOT NULL
+)
+SELECT
+  subject_id,
+  hadm_id,
+  MAX(CASE WHEN itemid = 220045 THEN valuenum END)
+                                          AS heart_rate_max,
+  MIN(CASE WHEN itemid IN (220179, 220050)
+           THEN valuenum END)             AS sbp_min,
+  MIN(CASE WHEN itemid IN (220180, 220051)
+           THEN valuenum END)             AS dbp_min,
+  MIN(CASE WHEN itemid IN (220181, 220052)
+           THEN valuenum END)             AS mbp_min,
+  MAX(CASE WHEN itemid = 220210 THEN valuenum END)
+                                          AS rr_max,
+  MIN(CASE WHEN itemid = 220277 THEN valuenum END)
+                                          AS spo2_min,
+  MAX(CASE
+        WHEN itemid = 223762 THEN valuenum
+        WHEN itemid = 223761
+          THEN (valuenum - 32) * 5.0 / 9.0
+      END)                                AS temp_max_c
+FROM vitals_window
+GROUP BY subject_id, hadm_id;
+")
+```
+
+## Vitals coverage + distribution
+
+```{r vitals-coverage}
+vitals_coverage <- dbGetQuery(con, "
+WITH cohort AS (
+  SELECT COUNT(*) AS n_total FROM stg_analytic
+)
+SELECT
+  (SELECT n_total FROM cohort)                          AS n_cohort,
+  COUNT(*)                                              AS n_with_any,
+  ROUND(100.0 * COUNT(*)
+        / (SELECT n_total FROM cohort), 1)              AS pct_any,
+  SUM(CASE WHEN heart_rate_max IS NOT NULL THEN 1 END)  AS n_hr,
+  SUM(CASE WHEN sbp_min        IS NOT NULL THEN 1 END)  AS n_sbp,
+  SUM(CASE WHEN dbp_min        IS NOT NULL THEN 1 END)  AS n_dbp,
+  SUM(CASE WHEN mbp_min        IS NOT NULL THEN 1 END)  AS n_mbp,
+  SUM(CASE WHEN rr_max         IS NOT NULL THEN 1 END)  AS n_rr,
+  SUM(CASE WHEN spo2_min       IS NOT NULL THEN 1 END)  AS n_spo2,
+  SUM(CASE WHEN temp_max_c     IS NOT NULL THEN 1 END)  AS n_temp
+FROM stg_vitals_24h;
+")
+print(vitals_coverage)
+
+vitals_summary <- dbGetQuery(con, "
+SELECT
+  ROUND(MEDIAN(heart_rate_max), 1)  AS med_hr_max,
+  ROUND(MEDIAN(sbp_min),        1)  AS med_sbp_min,
+  ROUND(MEDIAN(dbp_min),        1)  AS med_dbp_min,
+  ROUND(MEDIAN(mbp_min),        1)  AS med_mbp_min,
+  ROUND(MEDIAN(rr_max),         1)  AS med_rr_max,
+  ROUND(MEDIAN(spo2_min),       1)  AS med_spo2_min,
+  ROUND(MEDIAN(temp_max_c),     2)  AS med_temp_max_c
+FROM stg_vitals_24h;
+")
+print(vitals_summary)
+```
+
+# Build final merged analytic dataset
+
+Merge baseline covariates (stg_analytic) + 24h labs + 24h vitals
++ survival outcomes into one patient-level table.
+
+```{r build-analytic-final}
+dbExecute(con, "
+CREATE OR REPLACE TEMP TABLE stg_analytic_final AS
+SELECT
+  a.*,
+  l.wbc_max, l.hemoglobin_min, l.platelets_min,
+  l.creatinine_max, l.bun_max,
+  l.sodium_min, l.potassium_max, l.glucose_max,
+  l.anion_gap_max, l.rdw_max,
+  v.heart_rate_max, v.sbp_min, v.dbp_min, v.mbp_min,
+  v.rr_max, v.spo2_min, v.temp_max_c,
+  s.dod, s.death_30d, s.time_to_event_30d, s.censored_30d
+FROM stg_analytic a
+LEFT JOIN stg_labs_24h   l USING (subject_id, hadm_id)
+LEFT JOIN stg_vitals_24h v USING (subject_id, hadm_id)
+LEFT JOIN stg_final_surv s USING (subject_id, hadm_id);
+")
+
+analytic_final <- dbGetQuery(con,
+  "SELECT * FROM stg_analytic_final;")
+
+cat("Rows:   ", nrow(analytic_final), "\n")
+cat("Columns:", ncol(analytic_final), "\n\n")
+cat("Column names:\n")
+print(colnames(analytic_final))
+```
+
+## Per-variable missingness
+
+```{r missingness}
+miss_pct <- sapply(analytic_final, function(x)
+  round(100 * sum(is.na(x)) / length(x), 1))
+miss_tbl <- data.frame(
+  variable = names(miss_pct),
+  pct_missing = as.numeric(miss_pct)
+)
+miss_tbl <- miss_tbl[order(-miss_tbl$pct_missing), ]
+print(miss_tbl)
+```
+
+## Export to CSV for downstream analysis
+
+```{r export-csv}
+out_path <- "analytic_dataset.csv"
+write.csv(analytic_final, out_path, row.names = FALSE)
+
+cat("Saved to:", normalizePath(out_path), "\n")
+cat("File size:",
+    round(file.info(out_path)$size / 1e6, 2),
+    "MB\n")
+```
+
+```{r cleanup, eval=isTRUE(getOption("knitr.in.progress"))}
+dbDisconnect(con, shutdown = TRUE)
+```

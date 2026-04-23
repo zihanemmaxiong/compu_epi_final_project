@@ -1,0 +1,16 @@
+# R
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# macOS
+.DS_Store
+
+# MIMIC credentialed data — NEVER commit (PhysioNet DUA)
+raw_data/
+data/
+
+# Rendered outputs (may contain patient-level data) — review before committing
+*.html
+*_files/
