@@ -169,8 +169,8 @@ Outcomes in final cohort:
 ## Final Analytic Dataset — Codebook
 
 54 columns, one row per patient = one index admission. Exported as
-`data/data.csv` / `analytic_dataset.csv` (gitignored).
-Grain: `(subject_id, hadm_id)` is the unique key.
+`data/data.csv` (gitignored). Grain: `(subject_id, hadm_id)` is the
+unique key.
 
 ### Identifiers & timing
 
@@ -192,7 +192,7 @@ Grain: `(subject_id, hadm_id)` is the unique key.
 |---|---|---|
 | `gender` | chr | `M` / `F` |
 | `race` | chr | Raw MIMIC race string (multi-category; collapse for analysis) |
-| `insurance` | chr | Payer (Medicare / Medicaid / Other) |
+| `insurance` | chr | Payer (Medicare / Medicaid / Other / Private) |
 | `anchor_age` | int | Age at `anchor_year` (MIMIC deidentification anchor) |
 | `anchor_year` | int | Reference year for `anchor_age` |
 | `age_at_admit` | int | Age at index admission = `anchor_age + year(admittime) − anchor_year` |
@@ -319,9 +319,8 @@ size of MIMIC-IV `chartevents.csv.gz` (~30 GB uncompressed).
 
 ## Team
 
-- **Zihan Xiong** — study design, modeling strategy, DAG, methods,
-  writing
-- **Vicky** — data extraction, cleaning, statistical analysis,
+- **Zihan Xiong** — data extraction, wrangling, literattures, DAG
+- **Vicky** — statistical analysis, predictive modelling (if necessary),
   SQL/R implementation
 
 ---
