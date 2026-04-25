@@ -274,21 +274,23 @@ Extreme within 24h of `icu_intime`. Source: `chartevents`. NIBP and arterial-lin
 | `spo2_min` | SpO2 min (%) | % | MIN | 220277 |
 | `temp_max_c` | Temperature max (°C) | °C | MAX | 223761 (°F→°C), 223762 (°C) |
 
-### Primary outcome — in-hospital mortality
+### Outcomes
+
+**Primary** (Section 2.1, logistic regression):
 
 | Variable | Label | Type | Description |
 |---|---|---|---|
-| `hospital_expire_flag` | In-hospital death | 0/1 | Died before hospital discharge (from `admissions`) — **primary outcome** |
-| `discharge_location` | — | chr | Raw discharge disposition (HOME, HOSPICE, DIED, SNF, …) — descriptive / sensitivity |
+| `hospital_expire_flag` | In-hospital death | 0/1 | Died before hospital discharge (from `admissions`) |
 
-### Secondary outcome — 30-day all-cause mortality (Cox)
+**Secondary** (Section 2.3 LOS regression; Section 2.8 Cox at 3-/6-/12-month horizons):
 
 | Variable | Label | Type | Description |
 |---|---|---|---|
-| `dod` | — | date | Date of death from `patients.dod` (includes post-discharge deaths) |
-| `death_30d` | 30-day death | 0/1 | Event flag: died within 30 days of `admittime` |
-| `time_to_event_30d` | Time to event 30d | float | Days from `admittime` to event or censoring; capped at 30 |
-| `censored_30d` | — | 0/1 | Censored at day 30 (alive and no `dod` within 30 days) |
+| `icu_total_los` | ICU LOS (days) | float | Total ICU length of stay; log-transformed for regression |
+| `hospital_los` (derived) | Hospital LOS (days) | float | `dischtime − admittime` in days; log-transformed |
+| `dod` | — | date | Date of death from `patients.dod`; used to derive multi-horizon mortality |
+| `death_30d` | 30-day death | 0/1 | Event flag, died within 30 days of `admittime` (also `death_60d`, `death_90d`, `death_180d`, `death_365d` derived in Section 2.8) |
+| `time_to_event_30d` | Time to event 30d | float | Days from `admittime` to event or censoring; capped at 30 (analogues at other horizons) |
 
 ---
 
