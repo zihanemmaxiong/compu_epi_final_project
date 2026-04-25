@@ -172,6 +172,10 @@ Outcomes in final cohort:
 `data/data.csv` (gitignored). Grain: `(subject_id, hadm_id)` is the
 unique key.
 
+Each table below pairs the **technical column name** (used in code, e.g.
+`has_ckd`) with the **display label** (shown in regression result tables
+and figures, e.g. *"Chronic kidney disease"*).
+
 ### Identifiers & timing
 
 | Variable | Type | Description |
@@ -188,101 +192,103 @@ unique key.
 
 ### Demographics
 
-| Variable | Type | Description |
-|---|---|---|
-| `gender` | chr | `M` / `F` |
-| `race` | chr | Raw MIMIC race string (multi-category; collapse for analysis) |
-| `insurance` | chr | Payer (Medicare / Medicaid / Other / Private) |
-| `anchor_age` | int | Age at `anchor_year` (MIMIC deidentification anchor) |
-| `anchor_year` | int | Reference year for `anchor_age` |
-| `age_at_admit` | int | Age at index admission = `anchor_age + year(admittime) − anchor_year` |
+| Variable | Label | Type | Description |
+|---|---|---|---|
+| `gender` / `female` | Female sex | 0/1 | Female = 1 (derived from `gender == 'F'`) |
+| `race` / `race_group` | Race: \<level\> | chr | Collapsed to White / Black / Hispanic / Asian / Other; **White = reference** |
+| `insurance` / `insurance_group` | Insurance: \<level\> | chr | Medicare / Medicaid / Private / Other / Missing; **Medicare = reference** |
+| `anchor_age` | — | int | Age at `anchor_year` (MIMIC deidentification anchor) |
+| `anchor_year` | — | int | Reference year for `anchor_age` |
+| `age_at_admit` | Age (per year) | int | Age at index admission = `anchor_age + year(admittime) − anchor_year` |
 
 ### Exposure
 
-| Variable | Type | Description |
-|---|---|---|
-| `has_af_index` | 0/1 | **Hospital-documented AF during index admission** (ICD-9 427.31/427.32, ICD-10 I48.x) — primary exposure |
+| Variable | Label | Type | Description |
+|---|---|---|---|
+| `has_af_index` | Atrial fibrillation | 0/1 | **Hospital-documented AF during index admission** (ICD-9 427.31/427.32, ICD-10 I48.x) — primary exposure |
 
 ### HF subtype (from index-admission diagnoses)
 
 Not mutually exclusive. A row with all three = 0 has unspecified HF only (I50.9 / 428.9).
 
-| Variable | Type | Definition |
-|---|---|---|
-| `is_hfref` | 0/1 | Systolic HF — ICD-10 I50.21/22/23, ICD-9 428.21/22/23 |
-| `is_hfpef` | 0/1 | Diastolic HF — ICD-10 I50.31/32/33, ICD-9 428.31/32/33 |
-| `is_hfmixed` | 0/1 | Combined / specified — ICD-10 I50.41/42/43, I50.811/812/813; ICD-9 428.41/42/43 |
+| Variable | Label | Type | Definition |
+|---|---|---|---|
+| `is_hfref` | HF, reduced EF (HFrEF) | 0/1 | Systolic HF — ICD-10 I50.21/22/23, ICD-9 428.21/22/23 |
+| `is_hfpef` | HF, preserved EF (HFpEF) | 0/1 | Diastolic HF — ICD-10 I50.31/32/33, ICD-9 428.31/32/33 |
+| `is_hfmixed` | HF, mixed/other | 0/1 | Combined / specified — ICD-10 I50.41/42/43, I50.811/812/813; ICD-9 428.41/42/43 |
 
 ### Comorbidities (history-of flags)
 
 All binary 0/1. Defined as **any qualifying ICD code in any admission with `admittime ≤ index admittime`** (so prior admissions count). Source: `diagnoses_icd`.
 
-| Variable | Description |
-|---|---|
-| `has_htn` | Hypertension |
-| `has_dm` | Diabetes mellitus |
-| `has_ckd` | Chronic kidney disease |
-| `has_cad` | Coronary artery disease |
-| `has_copd` | Chronic obstructive pulmonary disease |
-| `has_valvular` | Valvular heart disease |
-| `has_pad` | Peripheral arterial disease |
-| `has_stroke_hx` | Stroke / TIA history |
-| `has_pulm_htn` | Pulmonary hypertension |
-| `has_cardiomyopathy` | Cardiomyopathy (non-ischemic) |
+| Variable | Label | Description |
+|---|---|---|
+| `has_htn` | Hypertension | Hypertension |
+| `has_dm` | Diabetes mellitus | Diabetes mellitus |
+| `has_ckd` | Chronic kidney disease | Chronic kidney disease |
+| `has_cad` | Coronary artery disease | Coronary artery disease |
+| `has_copd` | COPD | Chronic obstructive pulmonary disease |
+| `has_valvular` | Valvular disease | Valvular heart disease |
+| `has_pad` | Peripheral arterial disease | Peripheral arterial disease |
+| `has_stroke_hx` | Stroke / TIA history | Stroke or TIA history |
+| `has_pulm_htn` | Pulmonary hypertension | Pulmonary hypertension |
+| `has_cardiomyopathy` | Cardiomyopathy | Cardiomyopathy (non-ischemic) |
 
 ### ICU care unit (first ICU of index admission)
 
-| Variable | Type | Description |
-|---|---|---|
-| `first_careunit` | chr | Raw unit name (CCU, CVICU, MICU, SICU, MICU/SICU, …) |
-| `careunit_cat` | chr | Collapsed: **Cardiac** (CCU, CVICU) / **Medical** (MICU, MICU/SICU) / **Surgical/Other** |
+| Variable | Label | Type | Description |
+|---|---|---|---|
+| `first_careunit` | — | chr | Raw unit name (CCU, CVICU, MICU, SICU, MICU/SICU, …) |
+| `careunit_cat` | ICU unit: \<level\> | chr | Collapsed: **Cardiac** (CCU, CVICU) / **Medical** (MICU, MICU/SICU) / **Surgical/Other** |
+| `icu_cardiac` (derived) | Cardiac ICU | 0/1 | Indicator for `careunit_cat == 'Cardiac'` |
+| `icu_medical` (derived) | Medical ICU | 0/1 | Indicator for `careunit_cat == 'Medical'` |
 
 ### First-24h labs
 
 Extreme value within 24h of `icu_intime`. Source: `labevents` (fluid = 'Blood'). MIMIC default units, no conversion.
 
-| Variable | Units | Extreme | Rationale |
-|---|---|---|---|
-| `wbc_max` | K/µL | MAX | inflammation / infection burden |
-| `hemoglobin_min` | g/dL | MIN | worst anemia |
-| `platelets_min` | K/µL | MIN | worst thrombocytopenia |
-| `creatinine_max` | mg/dL | MAX | worst renal function |
-| `bun_max` | mg/dL | MAX | worst azotemia / volume status |
-| `sodium_min` | mEq/L | MIN | worst hyponatremia (HF prognostic) |
-| `potassium_max` | mEq/L | MAX | worst hyperkalemia (arrhythmia risk) |
-| `glucose_max` | mg/dL | MAX | stress hyperglycemia |
-| `anion_gap_max` | mEq/L | MAX | worst metabolic acidosis |
-| `rdw_max` | % | MAX | RDW (established HF mortality marker) |
+| Variable | Label | Units | Extreme | Rationale |
+|---|---|---|---|---|
+| `wbc_max` | WBC max (K/µL) | K/µL | MAX | inflammation / infection burden |
+| `hemoglobin_min` | Hemoglobin min (g/dL) | g/dL | MIN | worst anemia |
+| `platelets_min` | Platelets min (K/µL) | K/µL | MIN | worst thrombocytopenia |
+| `creatinine_max` | Creatinine max (mg/dL) | mg/dL | MAX | worst renal function |
+| `bun_max` | BUN max (mg/dL) | mg/dL | MAX | worst azotemia / volume status |
+| `sodium_min` | Sodium min (mEq/L) | mEq/L | MIN | worst hyponatremia (HF prognostic) |
+| `potassium_max` | Potassium max (mEq/L) | mEq/L | MAX | worst hyperkalemia (arrhythmia risk) |
+| `glucose_max` | Glucose max (mg/dL) | mg/dL | MAX | stress hyperglycemia |
+| `anion_gap_max` | Anion gap max | mEq/L | MAX | worst metabolic acidosis |
+| `rdw_max` | RDW max (%) | % | MAX | RDW (established HF mortality marker) |
 
 ### First-24h vitals
 
 Extreme within 24h of `icu_intime`. Source: `chartevents`. NIBP and arterial-line itemids are pooled for BP. Temperature converted to °C when sourced in °F.
 
-| Variable | Units | Extreme | MIMIC itemids |
-|---|---|---|---|
-| `heart_rate_max` | bpm | MAX | 220045 |
-| `sbp_min` | mmHg | MIN | 220179, 220050 |
-| `dbp_min` | mmHg | MIN | 220180, 220051 |
-| `mbp_min` | mmHg | MIN | 220181, 220052 |
-| `rr_max` | breaths/min | MAX | 220210 |
-| `spo2_min` | % | MIN | 220277 |
-| `temp_max_c` | °C | MAX | 223761 (°F→°C), 223762 (°C) |
+| Variable | Label | Units | Extreme | MIMIC itemids |
+|---|---|---|---|---|
+| `heart_rate_max` | Heart rate max (bpm) | bpm | MAX | 220045 |
+| `sbp_min` | SBP min (mmHg) | mmHg | MIN | 220179, 220050 |
+| `dbp_min` | DBP min (mmHg) | mmHg | MIN | 220180, 220051 |
+| `mbp_min` | MBP min (mmHg) | mmHg | MIN | 220181, 220052 |
+| `rr_max` | RR max (breaths/min) | breaths/min | MAX | 220210 |
+| `spo2_min` | SpO2 min (%) | % | MIN | 220277 |
+| `temp_max_c` | Temperature max (°C) | °C | MAX | 223761 (°F→°C), 223762 (°C) |
 
 ### Primary outcome — in-hospital mortality
 
-| Variable | Type | Description |
-|---|---|---|
-| `hospital_expire_flag` | 0/1 | Died before hospital discharge (from `admissions`) — **primary outcome** |
-| `discharge_location` | chr | Raw discharge disposition (HOME, HOSPICE, DIED, SNF, …) — descriptive / sensitivity |
+| Variable | Label | Type | Description |
+|---|---|---|---|
+| `hospital_expire_flag` | In-hospital death | 0/1 | Died before hospital discharge (from `admissions`) — **primary outcome** |
+| `discharge_location` | — | chr | Raw discharge disposition (HOME, HOSPICE, DIED, SNF, …) — descriptive / sensitivity |
 
 ### Secondary outcome — 30-day all-cause mortality (Cox)
 
-| Variable | Type | Description |
-|---|---|---|
-| `dod` | date | Date of death from `patients.dod` (includes post-discharge deaths) |
-| `death_30d` | 0/1 | Event flag: died within 30 days of `admittime` |
-| `time_to_event_30d` | float | Days from `admittime` to event or censoring; capped at 30 |
-| `censored_30d` | 0/1 | Censored at day 30 (alive and no `dod` within 30 days) |
+| Variable | Label | Type | Description |
+|---|---|---|---|
+| `dod` | — | date | Date of death from `patients.dod` (includes post-discharge deaths) |
+| `death_30d` | 30-day death | 0/1 | Event flag: died within 30 days of `admittime` |
+| `time_to_event_30d` | Time to event 30d | float | Days from `admittime` to event or censoring; capped at 30 |
+| `censored_30d` | — | 0/1 | Censored at day 30 (alive and no `dod` within 30 days) |
 
 ---
 
