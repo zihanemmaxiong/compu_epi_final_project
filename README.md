@@ -282,12 +282,10 @@ Extreme within 24h of `icu_intime`. Source: `chartevents`. NIBP and arterial-lin
 |---|---|---|---|
 | `hospital_expire_flag` | In-hospital death | 0/1 | Died before hospital discharge (from `admissions`) |
 
-**Secondary** (Section 2.3 LOS regression; Section 2.8 Cox at 3-/6-/12-month horizons):
+**Secondary** (Section 2.8 Cox at 3-/6-/12-month horizons):
 
 | Variable | Label | Type | Description |
 |---|---|---|---|
-| `icu_total_los` | ICU LOS (days) | float | Total ICU length of stay; log-transformed for regression |
-| `hospital_los` (derived) | Hospital LOS (days) | float | `dischtime − admittime` in days; log-transformed |
 | `dod` | — | date | Date of death from `patients.dod`; used to derive multi-horizon mortality |
 | `death_30d` | 30-day death | 0/1 | Event flag, died within 30 days of `admittime` (also `death_60d`, `death_90d`, `death_180d`, `death_365d` derived in Section 2.8) |
 | `time_to_event_30d` | Time to event 30d | float | Days from `admittime` to event or censoring; capped at 30 (analogues at other horizons) |
