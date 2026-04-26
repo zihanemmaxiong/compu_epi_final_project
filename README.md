@@ -26,6 +26,21 @@ outcome window to 30-day all-cause mortality (Cox regression)?
 distinguish truly new AF from previously undiagnosed pre-existing AF
 (per AHA 2023 Scientific Statement; Chyou et al. *Circulation*).
 
+**Task 3 revision (Apr 2026).** The Task 2 analysis used the ICD code
+`I48.x` as the AF exposure with no timestamp, which (1) prevented us
+from fixing immortal-time bias in the Cox model and (2) mixed truly
+new-onset AF with chronic AF that happened to be coded this admission.
+Task 3 (`task3_revised_analysis.ipynb`) replaces this with a
+**chartevents-anchored AF exposure** built from nurse-charted heart
+rhythm records (`itemid=220048`), giving a precise timestamp for AF
+onset. This enables a **time-varying Cox** that anchors AF status at
+the moment it first appears, eliminating immortal-time bias. A
+**chronic-AF proxy flag** is also built (rhythm AF ≤1 h after ICU
+admission OR an AF-specific drug ordered ≤1 h after admittime) to
+mark patients likely to have pre-existing AF. The same 9,463 patients
+selected by `cohort.Rmd` are kept; no patients are excluded in the
+revised primary analysis.
+
 ---
 
 ## Data Source & Compliance
@@ -53,8 +68,11 @@ final_project/
 ├── extract_hf_cohort.Rmd                 # main extraction pipeline
 ├── feasibility_check.Rmd                 # early feasibility analysis
 ├── data_desciptive.Rmd                   # descriptive analysis
+├── task1_descriptive_analysis.ipynb      # Task 1 — Table 1, distributions
+├── task2_statistical_analysis.ipynb      # Task 2 — original logistic + Cox (ICD AF)
+├── task3_revised_analysis.ipynb          # Task 3 — chartevents AF, time-varying Cox
 ├── final_project.Rproj                   # RStudio project file
-└── data/                                 # raw MIMIC CSVs (gitignored)
+└── data/                                 # MIMIC analytic dataset
 ```
 
 ---
@@ -126,28 +144,40 @@ Final merged analytic dataset is exported as `analytic_dataset.csv`
 
 ### 3. Modeling plan
 
-**Primary: multivariable logistic regression**
+**Primary: multivariable logistic regression** (Task 3 revision)
 - Outcome: in-hospital mortality (binary)
-- Exposure: hospital-documented AF (binary)
-- Confounders pre-specified from an *a priori* causal DAG
-  (not stepwise / AIC)
-- Three nested models reported: unadjusted, parsimonious, expanded
+- Exposure: `has_af_chartevents` — AF rhythm ever documented in
+  `chartevents itemid=220048` during the stay (rhythm-based, replaces
+  the ICD-only `has_af_index` used in Task 2)
+- Confounders pre-specified from an *a priori* causal DAG (not
+  stepwise / AIC)
+- Three nested models reported: unadjusted (Model 1), + demographics
+  (Model 2), + comorbidities + HF subtype + ICU type (Model 3, fully
+  adjusted)
+- The Task 2 mediator-adjusted Model 4 (24-h labs/vitals) is
+  intentionally **excluded** from the revised primary analysis: those
+  variables are downstream of AF and adjusting for them estimates a
+  *direct* effect, not the *total* effect we want here
 
-**Secondary: Cox proportional hazards**
-- Outcome: 30-day all-cause mortality (time-to-event,
-  right-censored at day 30)
-- Uses `patients.dod` for post-discharge deaths
+**Primary: time-varying Cox proportional hazards** (Task 3 revision)
+- Outcome: 365-day all-cause mortality (time-to-event,
+  right-censored at horizon; `patients.dod` for post-discharge deaths)
+- Exposure: AF status flips from 0 → 1 at `first_af_time` (the first
+  AF rhythm record). Each patient contributes 1 or 2 rows in
+  start/stop format — **eliminates immortal-time bias**
+- Adjustments mirror logistic Model 3
+- Schoenfeld test for AF: p = 0.92 (proportional hazards assumption
+  satisfied)
 
 **Sensitivity:**
-- Propensity score matching and IPTW
-- E-value for unmeasured confounding
-
-**Informatics layer:**
-- XGBoost prediction of hospital-documented AF from first-24h ICU
-  features (strict temporal ordering)
-- SHAP global + subgroup (HFrEF vs HFpEF) feature importance
-- Decision curve analysis for clinical utility
-- Explicit disclaimer that SHAP importance ≠ causal effect
+- S1: exclude `chronic_af_proxy = 1` patients (rhythm AF ≤ 1 h or
+  AF drug ≤ 1 h)
+- S2: redefine exposure as new-onset AF only
+  (`has_af_chartevents=1 AND chronic_af_proxy=0`)
+- Both sensitivities use the same Model 3 covariate set as the primary
+- Kaplan-Meier landmark analysis at 48 h for visual confirmation
+- (Planned, not in Task 3) propensity score / IPTW; E-value for
+  unmeasured confounding
 
 ### 4. Cohort flow (MIMIC-IV v3.1)
 
@@ -160,17 +190,27 @@ Final merged analytic dataset is exported as `analytic_dataset.csv`
 | No prior AF (final cohort) | **9,463** | **9,463** |
 
 Outcomes in final cohort:
-- Hospital-documented AF: 3,776 (39.9%)
+- Hospital-documented AF (ICD `has_af_index`, Task 2): 3,776 (39.9%)
+- Chartevents AF (`has_af_chartevents`, Task 3): 3,346 (35.4%)
+- Chronic-AF proxy (`chronic_af_proxy`, Task 3 transparency flag): 1,378 (14.6%)
+- New-onset AF only (`af_new_onset`, Task 3): 2,072 (21.9%)
 - In-hospital deaths: 1,265 (13.4%)
-- 30-day all-cause deaths: 1,541 (16.3%)
+- 365-day all-cause deaths: 3,156 (33.4%)
+
+ICD AF and chartevents AF disagree in 1,764 patients (~19% of cohort) —
+1,097 ICD-positive but chartevents-negative (likely chronic AF that
+did not manifest this admission; in-hospital mortality 8.6% — close to
+the no-AF baseline of 9.6%) and 667 chartevents-positive but ICD-negative
+(likely under-coded acute AF; in-hospital mortality 24.6%). This
+non-differential misclassification dilutes the Task 2 ICD-based OR.
 
 ---
 
 ## Final Analytic Dataset — Codebook
 
-54 columns, one row per patient = one index admission. Exported as
-`data/data.csv` (gitignored). Grain: `(subject_id, hadm_id)` is the
-unique key.
+73 columns (54 base + 19 added by Task 3), one row per patient =
+one index admission. Exported as `data/data.csv`. Grain:
+`(subject_id, hadm_id)` is the unique key.
 
 Each table below pairs the **technical column name** (used in code, e.g.
 `has_ckd`) with the **display label** (shown in regression result tables
@@ -290,6 +330,44 @@ Extreme within 24h of `icu_intime`. Source: `chartevents`. NIBP and arterial-lin
 | `death_30d` | 30-day death | 0/1 | Event flag, died within 30 days of `admittime` (also `death_60d`, `death_90d`, `death_180d`, `death_365d` derived in Section 2.8) |
 | `time_to_event_30d` | Time to event 30d | float | Days from `admittime` to event or censoring; capped at 30 (analogues at other horizons) |
 
+### Task 3 additions (chartevents AF, chronic-AF proxy, clean outcomes)
+
+19 columns added by `task3_revised_analysis.ipynb`. All derived from
+authoritative timestamps re-pulled from `raw_data/admissions.csv.gz`,
+`icustays.csv.gz`, and `patients.csv.gz` (the original
+`admittime / icu_intime / dod` columns in this CSV were written by R
+with 2-digit year format and parse inconsistently — Task 3 leaves them
+intact for backward compatibility but uses the freshly-pulled
+timestamps internally for all new derivations).
+
+**Chartevents-anchored AF exposure**
+
+| Variable | Label | Type | Description |
+|---|---|---|---|
+| `has_af_chartevents` | Atrial fibrillation (chartevents) | 0/1 | AF or atrial flutter rhythm ever recorded in `chartevents` (`itemid=220048`) during the stay — primary exposure in Task 3 |
+| `first_af_time` | — | datetime | Timestamp of the first AF/Aflut rhythm record (NA if never) |
+| `hrs_to_first_af` | — | float | Hours from `icu_intime` to `first_af_time` |
+| `n_af_records` | — | int | Number of AF/Aflut rhythm records during the stay |
+| `n_rhythm_records` | — | int | Number of any rhythm records (denominator for monitoring intensity) |
+
+**Chronic-AF proxy (transparency flag, no exclusion)**
+
+| Variable | Label | Type | Description |
+|---|---|---|---|
+| `af_at_admission` | — | 0/1 | First AF rhythm recorded ≤ 1 h after `icu_intime` (came in already in AF) |
+| `af_drug_at_admit` | — | 0/1 | An AF-specific drug (amiodarone / digoxin / sotalol / dofetilide / dronedarone / propafenone / flecainide) ordered ≤ 1 h after `admittime` |
+| `chronic_af_proxy` | — | 0/1 | `af_at_admission OR af_drug_at_admit` — likely-chronic AF flag |
+| `af_new_onset` | Atrial fibrillation (new-onset only) | 0/1 | `has_af_chartevents=1 AND chronic_af_proxy=0` — used as exposure in Sensitivity 2 |
+
+**Clean outcomes (re-computed from authoritative `deathtime` / `dod`)**
+
+| Variable | Label | Type | Description |
+|---|---|---|---|
+| `death_inhosp_clean` | — | 0/1 | `deathtime` falls in `[admittime, dischtime]` |
+| `days_to_death_clean` | — | float | Days from `icu_intime` to `dod` (NA if alive) |
+| `event_30d` `event_90d` `event_180d` `event_365d` | — | 0/1 | Death within horizon h, anchored at `icu_intime` |
+| `t2event_30d` `t2event_90d` `t2event_180d` `t2event_365d` | — | float | Time-to-event in days = `min(days_to_death_clean, h)` with a 1-hour floor (replaces the ad-hoc `clip(lower=0.5)` in the Task 2 build) |
+
 ---
 
 ## Running the pipeline
@@ -308,17 +386,18 @@ size of MIMIC-IV `chartevents.csv.gz` (~30 GB uncompressed).
 ## Current Status
 
 - [x] Cohort construction
-- [x] Outcome variables (in-hospital + 30-day mortality)
+- [x] Outcome variables (in-hospital + 30-/90-/180-/365-day mortality)
 - [x] Demographics, HF subtype, comorbidities, ICU care unit
 - [x] First-24h labs (10 extremes)
 - [x] First-24h vitals (7 extremes)
 - [x] Merged analytic dataset exported
-- [ ] Causal DAG drafted
-- [ ] Table 1 generation
-- [ ] Primary logistic regression (3 nested models)
-- [ ] Secondary Cox regression
-- [ ] Propensity score sensitivity
-- [ ] XGBoost + SHAP informatics layer
+- [x] Task 1: Table 1 + distributions
+- [x] Task 2: original logistic + Cox (ICD AF)
+- [x] Task 3: chartevents AF, time-varying Cox, chronic-AF proxy,
+      KM landmark, sensitivity analyses
+- [ ] Causal DAG drafted (informal version baked into Task 3 covariate selection)
+- [ ] Propensity score / IPTW sensitivity (planned)
+- [ ] XGBoost + SHAP informatics layer (planned)
 - [ ] Paper writing and presentation slides
 
 ---
